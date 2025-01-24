@@ -1,6 +1,10 @@
 using Bogers.Blackflag;
 using Microsoft.AspNetCore.Mvc;
 
+await TwitCastingAuthenticator.Test();
+
+return;
+
 // meant for internal use only!
 // todo: ffmpeg generator endpoint -> ffmpeg -i "MY_URL" -c copy MY_OUTPUT.mkv
 

@@ -14,4 +14,9 @@
       <PackageReference Include="Microsoft.Playwright" Version="1.49.0" />
     </ItemGroup>
 
+    <ItemGroup>
+      <Content Include=".data\cookies.json" />
+      <Content Include=".data\credentials.json" />
+    </ItemGroup>
+
 </Project>
