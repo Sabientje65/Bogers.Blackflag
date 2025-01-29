@@ -1,64 +1,117 @@
-﻿using System.Text;
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Playwright;
 
 namespace Bogers.Blackflag;
 
-public class TwitCastingAuthenticator
+public class TwitCasting : IAsyncDisposable
 {
-    public static async Task Test()
+    private IPlaywright Playwright { get; init; }
+    private IBrowser Browser { get; init; }
+    private IPage TwitCastingPage { get; init; }
+
+    private readonly string _storagePath = "E:/src/Bogers.BlackFlag/.data/cookies.json";
+    private readonly string _credentialsPath = "E:/src/Bogers.BlackFlag/.data/credentials.json";
+    
+    public static async Task<TwitCasting> Create()
     {
-        await new TwitCastingAuthenticator().Authenticate();
+        var playwright = await Microsoft.Playwright.Playwright.CreateAsync();
+        var firefox = await playwright.Firefox.LaunchAsync(new BrowserTypeLaunchOptions { Headless = false });
+        var page = await firefox.NewPageAsync();
+        await page.GotoAsync("https://twitcasting.tv");
+
+        return new TwitCasting
+        {
+            Playwright = playwright,
+            Browser = firefox,
+            TwitCastingPage = page
+        };
+    }
+
+    /// <summary>
+    /// Populate the given session as TwitCasting session, making the session eligible for twitcasting downloads
+    /// </summary>
+    public async Task PopulateDownloadSession(
+        Session session,
+        string playlistFile
+    )
+    {
+        var twitCastingSession = new TwitCastingDownloadSession(session)
+        {
+            UserFriendlyId = await ReadCookie("tc_id"),
+            UserId = await ReadCookie("did"),
+            SessionId = await ReadCookie("tc_ss"),
+            UserAgent = await TwitCastingPage.EvaluateAsync<string>("navigator.userAgent"),
+            Host = new Uri(playlistFile).Host
+        };
     }
     
-    // when running 
+    /// <summary>
+    /// Authenticate the current TwitCasting instance by signing in to TwitCasting
+    /// </summary>
     public async Task Authenticate()
     {
-        using var playwright = await Playwright.CreateAsync();
-        await using var firefox = await playwright.Firefox.LaunchAsync(new BrowserTypeLaunchOptions { Headless = false });
+        if (File.Exists(_storagePath)) await AuthenticateFromSavedCookies();
+        else await AuthenticateViaTwitter();
+    }
 
-        var page = await firefox.NewPageAsync();
-        await CachedAuthentication(page);
-        await page.GotoAsync("https://twitcasting.tv");
-        // var myCookies = (await page.Context.CookiesAsync(["https://twitcasting.tv"]));
-        await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
-
-        var myId = await ReadCookie(page, "tc_id");
-        var myTickets = await page.GotoAsync($"https://twitcasting.tv/{myId}/shopmytickets");
+    /// <summary>
+    /// Get a collection of all tickets belonging to current user
+    /// </summary>
+    /// <returns></returns>
+    public async Task<string[]> GetMyTickets()
+    {
+        var myId = await ReadCookie("tc_id");
+        await TwitCastingPage.GotoAsync($"https://twitcasting.tv/{myId}/shopmytickets");
         
         // find all tickets
-        var ticketsLocator = page
-            .Locator(".tw-shop-ticket-card2");
+        var ticketsLocator = TwitCastingPage.Locator(".tw-shop-ticket-card2");
 
         var ticketNames = await ticketsLocator.Locator(".tw-shop-ticket-card2-title")
             .AllInnerTextsAsync();
-        
-        // fake selection -> first available ticket
-        await ticketsLocator.GetByText(ticketNames[0]).ClickAsync(); // navigate to event page
-        await page.GetByText("Go to archive page").ClickAsync(); // navigate to archives page
-        
-        // text may be cutoff, assume first 10 characters are suffice for identifying our archive
-        await page.GetByText(ticketNames[0][..Math.Min(ticketNames[0].Length, 10)]).ClickAsync(); // navigate to event archive
-        
-        await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+        return ticketNames.ToArray();
     }
 
-    private async Task<string> ReadCookie(IPage page, string cookieName) => (await page.Context.CookiesAsync(["https://twitcasting.tv"]))
-        !.SingleOrDefault(c => c.Name == cookieName)
-        !.Value;
+    /// <summary>
+    /// Get the m3u8 file associated with the given ticket
+    /// </summary>
+    /// <returns></returns>
+    public async Task<string> GetTicketPlaylistFile(string ticketName)
+    {
+        var myId = await ReadCookie("tc_id");
+        await TwitCastingPage.GotoAsync($"https://twitcasting.tv/{myId}/shopmytickets");
+        
+        // find all tickets
+        var ticketsLocator = TwitCastingPage.Locator(".tw-shop-ticket-card2");
 
-    private async Task CachedAuthentication(IPage page)
+        await ticketsLocator.GetByText(ticketName).ClickAsync(); // navigate to event page
+        await TwitCastingPage.GetByText("Go to archive page").ClickAsync(); // navigate to archives page
+        
+        // text may be cutoff, assume first 10 characters are suffice for identifying our archive
+        await TwitCastingPage.GetByText(ticketName[..Math.Min(ticketName.Length, 10)]).ClickAsync(); // navigate to event archive
+
+        var playlistFile = await TwitCastingPage.RunAndWaitForResponseAsync(
+            async () => await TwitCastingPage.ClickAsync(".vjs-big-play-button"),
+            response => response.Url.Contains("master.m3u8")
+        );
+
+        return playlistFile.Url;
+    }
+
+    /// <summary>
+    /// Authenticate from cookies saved to disk
+    /// </summary>
+    private async Task AuthenticateFromSavedCookies()
     {
         var initialCookies = JsonSerializer.Deserialize<BrowserContextCookiesResult[]>(
-            await File.ReadAllTextAsync("E:/src/Bogers.BlackFlag/.data/cookies.json")    
+            await File.ReadAllTextAsync(_storagePath)    
         )!;
 
         var twitCastingCookies = initialCookies
             .Where(x => x.Domain == ".twitcasting.tv");
-        // page.Context.CookiesAsync(initialCookies)
-
-        await page.Context.AddCookiesAsync(twitCastingCookies.Select(c => new Cookie
+        
+        await TwitCastingPage.Context.AddCookiesAsync(twitCastingCookies.Select(c => new Cookie
         {
             Domain = c.Domain,
             HttpOnly = c.HttpOnly,
@@ -66,173 +119,66 @@ public class TwitCastingAuthenticator
             Path = c.Path,
             SameSite = c.SameSite,
             Secure = c.Secure,
-            // Url = c.,
             Value = c.Value
         }));
-        
     }
-
-    private async Task FreshAuthentication(IPage page)
+    
+    /// <summary>
+    /// Signin via twitter oauth flow
+    ///
+    /// Requires twitter credentials to be configured
+    /// </summary>
+    private async Task AuthenticateViaTwitter()
     {
         var credentials = JsonSerializer.Deserialize<JsonObject>(
-            await File.ReadAllTextAsync("E:/src/Bogers.BlackFlag/.data/cookies.json")
+            await File.ReadAllTextAsync(_credentialsPath)
         );
         
-        await page.GotoAsync("https://twitcasting.tv/indexloginwindow.php");
-        await page.WaitForLoadStateAsync(LoadState.NetworkIdle); // wait for requests to finish
-        await page.ClickAsync(".tw-casaccount-button[aria-label=\"Twitter\"]"); // twitter login button
+        await TwitCastingPage.GotoAsync("https://twitcasting.tv/indexloginwindow.php");
+        await TwitCastingPage.WaitForLoadStateAsync(LoadState.NetworkIdle); // wait for requests to finish
+        await TwitCastingPage.ClickAsync(".tw-casaccount-button[aria-label=\"Twitter\"]"); // twitter login button
         
         // twitter oauth page
-        await page.WaitForLoadStateAsync(LoadState.NetworkIdle); // wait for requests to finish
-        await page.HoverAsync("#allow");
+        await TwitCastingPage.WaitForLoadStateAsync(LoadState.NetworkIdle); // wait for requests to finish
+        await TwitCastingPage.HoverAsync("#allow");
         
         // for some reason needs to be clicked twice?
-        await page.ClickAsync("#allow");
-        await page.WaitForLoadStateAsync(LoadState.NetworkIdle); // wait for requests to finish
-        await page.ClickAsync("#allow"); // needs to be clicked twice for some reason
-
-        // force focus
-        await page.ClickAsync("[autocomplete=\"username\"]");
+        await TwitCastingPage.ClickAsync("#allow");
+        await TwitCastingPage.WaitForLoadStateAsync(LoadState.NetworkIdle); // wait for requests to finish
+        await TwitCastingPage.ClickAsync("#allow"); // needs to be clicked twice for some reason
         
         // twitter signin page, fill username
-        await page.Locator("[autocomplete=\"username\"]").FillAsync(credentials["email"].ToString());
-        await page.GetByText("Next").ClickAsync();
+        await TwitCastingPage.Locator("[autocomplete=\"username\"]").FillAsync(credentials["email"].ToString());
+        await TwitCastingPage.GetByText("Next").ClickAsync();
 
-        // await Task.Delay(TimeSpan.FromMilliseconds(Random.Shared.Next(750, 2500)));
-        
         // only when verification actually appears!
-        await page.Locator("[data-testid=\"ocfEnterTextTextInput\"]").FillAsync(credentials["phonenumber"].ToString());
-        await page.GetByText("Next").ClickAsync();
-
-        // fake human reaction speed
-        // await Task.Delay(TimeSpan.FromMilliseconds(Random.Shared.Next(750, 2500)));
-        
-        await page.ClickAsync("[name=\"password\"]");
+        await TwitCastingPage.Locator("[data-testid=\"ocfEnterTextTextInput\"]").FillAsync(credentials["phonenumber"].ToString());
+        await TwitCastingPage.GetByText("Next").ClickAsync();
         
         // wait for login form to load
-        await page.Locator("[name=\"password\"]").WaitForAsync();
-        await page.Locator("[name=\"password\"]").FillAsync(credentials["password"].ToString());
+        await TwitCastingPage.Locator("[name=\"password\"]").WaitForAsync();
+        await TwitCastingPage.Locator("[name=\"password\"]").FillAsync(credentials["password"].ToString());
         
-        // fake human reaction speed
-        // await Task.Delay(TimeSpan.FromMilliseconds( Random.Shared.Next(750, 2500) ));
-        await page.GetByText("Log in").FocusAsync();
-        // fake human reaction speed
-        // await Task.Delay(TimeSpan.FromMilliseconds( Random.Shared.Next(10, 50) ));
+        await TwitCastingPage.GetByText("Log in").ClickAsync();
+
+        await TwitCastingPage.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await TwitCastingPage.WaitForURLAsync(url => url.Contains("twitcasting.tv", StringComparison.OrdinalIgnoreCase));
+
         
-        await page.GetByText("Log in").ClickAsync();
-
-        await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
-        await page.WaitForURLAsync(url => url.Contains("twitcasting.tv", StringComparison.OrdinalIgnoreCase));
-
-        var cookies = await page.Context.CookiesAsync();
-        var x = cookies;
-    }
-}
-
-public class TwitCasting
-{
-    private readonly IHttpClientFactory _httpClientFactory;
-    private readonly TwitCastingDownloadSession _session;
-    
-    public TwitCasting(
-        IHttpClientFactory httpClientFactory,
-        Session session
-    )
-    {
-        _httpClientFactory = httpClientFactory;
-        _session = new TwitCastingDownloadSession(session);
-    }
-
-    /// <summary>
-    /// Proxies the request to TwitCasting authenticating using the current session
-    /// </summary>
-    /// <param name="request"></param>
-    /// <param name="response"></param>
-    public async Task ProxyToTwitCasting(HttpRequest request, HttpResponse response)
-    {
-        using var http = _httpClientFactory.CreateClient();
-        http.DefaultRequestHeaders.Host = _session.Host;
-        http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", _session.UserAgent);
-        http.DefaultRequestHeaders.Add("Cookie", $"keep=1; hl=en; did={_session.UesrId}; fftc_id={_session.UserFriendlyId}; tc_ss={_session.SessionId}");
-   
-        
-        var scheme = request.Scheme ?? string.Empty;
-        var host = _session.Host;
-        var pathBase = request.PathBase.Value ?? string.Empty;
-        var path = request.Path.Value ?? string.Empty;
-        var queryString = request.QueryString.Value ?? string.Empty;
-        
-        // taken from request.GetDisplayUrl()
-        var url = new StringBuilder()
-            .Append(scheme)
-            .Append(Uri.SchemeDelimiter)
-            .Append(host)
-            .Append(pathBase)
-            .Append(path)
-            .Append(queryString)
-            .ToString();
-        
-        // assume just GET requests for now
-        var res = await http.GetAsync(url);
-        await res.Content.CopyToAsync(response.Body);
-        await response.Body.FlushAsync();
-    }
-}
-
-/// <summary>
-/// Typed wrapper around a twitcasting session
-/// </summary>
-public class TwitCastingDownloadSession
-{
-    private readonly Session _session;
-    
-    public TwitCastingDownloadSession(Session session)
-    {
-        _session = session;
-    }
-
-    /// <summary>
-    /// Hostname to use for subsequent requests, should use the following scheme {videoid?}.twitcasting.tv, eg. dl193250.twitcasting.tv
-    /// </summary>
-    public string Host
-    {
-        get => _session["twitcasting.videoid"];
-        set => _session["twitcasting.videoid"] = value;
-    }
-
-    /// <summary>
-    /// UserAgent header to use for subsequent requests
-    /// </summary>
-    public string UserAgent
-    {
-        get => _session["twitcasting.useragent"];
-        set => _session["twitcasting.useragent"] = value;
-    }
-
-    /// <summary>
-    /// Assumed to be twitcastings userid, extracted from `did` cookie
-    /// </summary>
-    public string UesrId
-    {
-        get => _session["twitcasting.userid"];
-        set => _session["twitcasting.userid"] = value;
+        // todo: save cookies to disk
+        // var cookies = await page.Context.CookiesAsync();
     }
     
-    /// <summary>
-    /// Assumed to be a displayname/userfriendly id, extracted from `fftc_id` cookie
-    /// </summary>
-    public string UserFriendlyId
-    {
-        get => _session["twitcasting.userfriendlyid"];
-        set => _session["twitcasting.userfriendlyid"] = value;
-    }
+    private async Task<string> ReadCookie(string cookieName) => (await TwitCastingPage.Context.CookiesAsync(["https://twitcasting.tv"]))
+        !.SingleOrDefault(c => c.Name == cookieName)
+        !.Value;
     
-    /// <summary>
-    /// Assumed to be a session id of some kind, extracted from `tc_ss` cookie
-    /// </summary>
-    public string SessionId
+    public async ValueTask DisposeAsync()
     {
-        get => _session["twitcasting.sessionid"];
-        set => _session["twitcasting.sessionid"] = value;
+        if (Playwright is IAsyncDisposable playwrightAsyncDisposable) await playwrightAsyncDisposable.DisposeAsync();
+        else Playwright.Dispose();
+        
+        
+        await Browser.DisposeAsync();
     }
 }

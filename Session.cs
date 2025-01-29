@@ -22,7 +22,7 @@ public class Session
     /// <summary>
     /// Session key, can be used for future requests
     /// </summary>
-    public string Key { get; } = Guid.NewGuid().ToString("N");
+    public string Key { get; private init;  } = Guid.NewGuid().ToString("N");
 
     /// <summary>
     /// Timestamp the session was created
@@ -63,11 +63,6 @@ public class Session
     }
 
     /// <summary>
-    /// Make the current session the 'active' session
-    /// </summary>
-    public Session MakeActive() => ActiveSession = this;
-
-    /// <summary>
     /// Clear the current session
     /// </summary>
     public void Clear() => _values.Clear();
@@ -75,12 +70,20 @@ public class Session
     // public string this[string key] => ReadStringValue(key);
     
     /// <summary>
-    /// Create a new session with a random key and returns it
+    /// Either get or create a new session for the given port and returns it
     /// </summary>
     /// <returns>Create a new session</returns>
-    public static Session New()
+    public static Session ForPort(int port)
     {
-        var session = new Session();
+        var key = port.ToString();
+        if (!_sessions.TryGetValue(key, out var session))
+        {
+            session = new Session
+            {
+                Key = key
+            };
+            _sessions[key] = session;
+        }
         return session;
     }
 
@@ -92,11 +95,4 @@ public class Session
         // todo :P 
         throw new NotImplementedException();
     }
-
-    /// <summary>
-    /// Locate the session with the given key, returns NULL when no session was found
-    /// </summary>
-    /// <param name="key">Session key</param>
-    /// <returns>Session or NULL</returns>
-    public static Session? FromKey(string key) => _sessions.TryGetValue(key, out var session) ? session : null;
 }
